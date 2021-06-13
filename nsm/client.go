@@ -1,6 +1,7 @@
 package nsm
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -36,10 +37,34 @@ const (
 	ClientSave     = "/nsm/client/save"
 )
 
+type ClientState int
+
+const (
+	StateInitializing ClientState = iota
+	StateConnecting
+	StateConnected
+	StateError
+)
+
+const (
+	ErrGeneral         = -1
+	ErrIncompatibleAPI = -2
+	ErrBlacklisted     = -3
+	ErrLaunchFailed    = -4
+	ErrNoSuchFile      = -5
+	ErrNoSessionOpen   = -6
+	ErrUnsavedChanges  = -7
+	ErrNotNow          = -8
+	ErrBadProject      = -9
+	ErrCreateFailed    = -10
+)
+
 type Client struct {
 	Osc                *osc.Client
 	Server             string
 	Servername         string
+	State              ClientState
+	Error              error
 	serverCapabilities []ServerCapability
 	clientCapabilities []ClientCapability
 	clientOpen         func(projectPath, displayName, clientID string) error
@@ -67,6 +92,7 @@ func NewClient(name string, opts ...Option) (*Client, error) {
 	client := &Client{
 		Osc:    osc.NewClient(u.Hostname(), serverport),
 		Server: u.Host,
+		State:  StateInitializing,
 	}
 
 	for _, o := range opts {
@@ -79,10 +105,11 @@ func NewClient(name string, opts ...Option) (*Client, error) {
 	if client.clientSave == nil {
 		return nil, errors.New("no client save handler configured")
 	}
+	// TODO: check other handlers depending on client capabilities
 
 	announceReceived := make(chan error)
 
-	// TODO: setup message handlers
+	// setup message handlers
 	d := osc.NewStandardDispatcher()
 	d.AddMsgHandler("/reply", func(msg *osc.Message) {
 		tags, _ := msg.TypeTags()
@@ -143,26 +170,71 @@ func NewClient(name string, opts ...Option) (*Client, error) {
 	d.AddMsgHandler(ClientSave, func(msg *osc.Message) {
 		err := client.clientSave()
 		if err != nil {
-			msg := osc.NewMessage("/error", ClientSave, -1, err.Error())
+			// TODO: create and handle NSMError type
+			msg := osc.NewMessage("/error", ClientSave, ErrGeneral, err.Error())
 			client.Osc.Send(msg)
 		} else {
 			msg := osc.NewMessage("/reply", ClientSave, "ok")
 			client.Osc.Send(msg)
 		}
 	})
+	// TODO: optional handlers
 
 	client.Osc.SetDispatcher(d)
-	// TODO: connect
-	// TODO: listen and serve thread
-	// TODO: wait for connection
-	// TODO: send announce message
-	// TODO: wait for initial communication to finish
+
+	// connect
+	err = client.Osc.Connect()
+	if err != nil {
+		return nil, err
+	}
+	client.State = StateConnecting
+
+	// listen and serve thread
+	go func() {
+		err := client.Osc.ListenAndServe()
+		if err != nil {
+			client.Osc.Close()
+			client.State = StateError
+			client.Error = err
+		}
+	}()
+
+	// wait for connection
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for !client.Osc.Connected() {
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			client.Osc.Close()
+			return nil, errors.New("connection failed")
+		}
+	}
+	client.State = StateConnected
+
+	// send announce message
+	msg := osc.NewMessage(ServerAnnounce)
+	var capListBuilder strings.Builder
+	capListBuilder.WriteRune(':')
+	for _, cap := range client.clientCapabilities {
+		capListBuilder.WriteString(string(cap))
+	}
+	capListBuilder.WriteRune(':')
+	msg.Append(name, capListBuilder.String(), os.Args[0], int32(1), int32(0), int32(os.Getpid()))
+	err = client.Osc.Send(msg)
+	if err != nil {
+		client.Osc.Close()
+		return nil, fmt.Errorf("error sending msg: %v", err)
+	}
+
+	// wait for initial communication to finish
 	select {
 	case err := <-announceReceived:
 		if err != nil {
 			return nil, err
 		}
 	case <-time.After(10 * time.Second):
+		// TODO: how to end ListenAndServer?
 		return nil, errors.New("timeout while waiting for server announce reply")
 	}
 
@@ -170,6 +242,19 @@ func NewClient(name string, opts ...Option) (*Client, error) {
 }
 
 func (c *Client) ServerHasCapability(cap ServerCapability) bool {
-	// TODO: implement
+	for _, scap := range c.serverCapabilities {
+		if cap == scap {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) HasCapability(cap ClientCapability) bool {
+	for _, ccap := range c.clientCapabilities {
+		if cap == ccap {
+			return true
+		}
+	}
 	return false
 }
