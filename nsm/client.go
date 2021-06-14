@@ -32,9 +32,14 @@ const (
 )
 
 const (
-	ServerAnnounce = "/nsm/server/announce"
-	ClientOpen     = "/nsm/client/open"
-	ClientSave     = "/nsm/client/save"
+	ServerAnnounce        = "/nsm/server/announce"
+	ClientOpen            = "/nsm/client/open"
+	ClientSave            = "/nsm/client/save"
+	ClientIsDirty         = "/nsm/client/is_dirty"
+	ClientIsClean         = "/nsm/client/is_clean"
+	ClientSessionLoaded   = "/nsm/client/session_is_loaded"
+	ClientShowOptionalGui = "/nsm/client/show_optional_gui"
+	ClientHideOptionalGui = "/nsm/client/hide_optional_gui"
 )
 
 type ClientState int
@@ -46,29 +51,18 @@ const (
 	StateError
 )
 
-const (
-	ErrGeneral         = -1
-	ErrIncompatibleAPI = -2
-	ErrBlacklisted     = -3
-	ErrLaunchFailed    = -4
-	ErrNoSuchFile      = -5
-	ErrNoSessionOpen   = -6
-	ErrUnsavedChanges  = -7
-	ErrNotNow          = -8
-	ErrBadProject      = -9
-	ErrCreateFailed    = -10
-)
-
 type Client struct {
-	Osc                *osc.Client
-	Server             string
-	Servername         string
-	State              ClientState
-	Error              error
-	serverCapabilities []ServerCapability
-	clientCapabilities []ClientCapability
-	clientOpen         func(projectPath, displayName, clientID string) error
-	clientSave         func() error
+	Osc                 *osc.Client
+	Server              string
+	Servername          string
+	State               ClientState
+	Error               error
+	serverCapabilities  []ServerCapability
+	clientCapabilities  []ClientCapability
+	clientOpen          func(projectPath, displayName, clientID string) error
+	clientSave          func() error
+	clientShowGui       func(showGui bool)
+	clientSessionLoaded func()
 }
 
 type Option interface {
@@ -105,7 +99,9 @@ func NewClient(name string, opts ...Option) (*Client, error) {
 	if client.clientSave == nil {
 		return nil, errors.New("no client save handler configured")
 	}
-	// TODO: check other handlers depending on client capabilities
+	if client.HasCapability(CapabilityClientOptionalGUI) && client.clientShowGui == nil {
+		return nil, errors.New("option optional-gui set, but no optional gui handler configured")
+	}
 
 	announceReceived := make(chan error)
 
@@ -134,7 +130,6 @@ func NewClient(name string, opts ...Option) (*Client, error) {
 			}
 			announceReceived <- nil
 		}
-		// TODO: other replies
 	})
 	d.AddMsgHandler("/error", func(msg *osc.Message) {
 		tags, _ := msg.TypeTags()
@@ -170,15 +165,32 @@ func NewClient(name string, opts ...Option) (*Client, error) {
 	d.AddMsgHandler(ClientSave, func(msg *osc.Message) {
 		err := client.clientSave()
 		if err != nil {
-			// TODO: create and handle NSMError type
-			msg := osc.NewMessage("/error", ClientSave, ErrGeneral, err.Error())
+			code := ErrGeneral
+			if nsmErr, ok := err.(*Error); ok {
+				code = nsmErr.Code
+			}
+			msg := osc.NewMessage("/error", ClientSave, code, err.Error())
 			client.Osc.Send(msg)
 		} else {
 			msg := osc.NewMessage("/reply", ClientSave, "ok")
 			client.Osc.Send(msg)
 		}
 	})
-	// TODO: optional handlers
+	d.AddMsgHandler(ClientSessionLoaded, func(msg *osc.Message) {
+		if client.clientSessionLoaded != nil {
+			client.clientSessionLoaded()
+		}
+	})
+	d.AddMsgHandler(ClientShowOptionalGui, func(msg *osc.Message) {
+		if client.clientShowGui != nil {
+			client.clientShowGui(true)
+		}
+	})
+	d.AddMsgHandler(ClientHideOptionalGui, func(msg *osc.Message) {
+		if client.clientShowGui != nil {
+			client.clientShowGui(false)
+		}
+	})
 
 	client.Osc.SetDispatcher(d)
 
@@ -257,4 +269,14 @@ func (c *Client) HasCapability(cap ClientCapability) bool {
 		}
 	}
 	return false
+}
+
+func (c *Client) SetDirty(dirty bool) {
+	if c.HasCapability(CapabilityClientDirty) {
+		if dirty {
+			c.Osc.Send(osc.NewMessage(ClientIsDirty))
+		} else {
+			c.Osc.Send(osc.NewMessage(ClientIsClean))
+		}
+	}
 }

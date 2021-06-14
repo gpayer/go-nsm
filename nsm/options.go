@@ -47,3 +47,35 @@ func SetSaveHandler(handler func() error) Option {
 		handler: handler,
 	}
 }
+
+type OptionShowGuiHandler struct {
+	handler func(showGui bool)
+}
+
+func (o *OptionShowGuiHandler) configure(c *Client) {
+	c.clientShowGui = o.handler
+}
+
+var _ Option = (*OptionShowGuiHandler)(nil)
+
+func SetShowGuiHandler(handler func(bool)) Option {
+	return &OptionShowGuiHandler{
+		handler: handler,
+	}
+}
+
+type OptionSessionLoadedHandler struct {
+	handler func()
+}
+
+func (o *OptionSessionLoadedHandler) configure(c *Client) {
+	c.clientSessionLoaded = o.handler
+}
+
+var _ Option = (*OptionSessionLoadedHandler)(nil)
+
+func SetSessionLoadedHandler(handler func()) Option {
+	return &OptionSessionLoadedHandler{
+		handler: handler,
+	}
+}

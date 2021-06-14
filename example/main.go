@@ -17,8 +17,10 @@ func main() {
 
 	savePath := ""
 	cID := ""
-	client, err := nsm.NewClient("NSM Example Client",
-		nsm.SetOptCapabilities(nsm.CapabilityClientSwitch),
+	var client *nsm.Client
+	var err error
+	client, err = nsm.NewClient("NSM Example Client",
+		nsm.SetOptCapabilities(nsm.CapabilityClientSwitch, nsm.CapabilityClientDirty),
 		nsm.SetOpenHandler(func(projectPath, displayName, clientID string) error {
 			savePath = projectPath
 			cID = clientID
@@ -36,6 +38,7 @@ func main() {
 			f.WriteString("ClientID: ")
 			f.WriteString(cID)
 			f.WriteString("\n")
+			client.SetDirty(false)
 			return nil
 		}))
 	if err != nil {
@@ -43,6 +46,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	count := 0
 	for {
 		select {
 		case <-signals:
@@ -52,6 +56,11 @@ func main() {
 		if client.State == nsm.StateError {
 			fmt.Printf("ERROR: %v\n", client.Error)
 			return
+		}
+		count++
+		if count > 10 {
+			client.SetDirty(true)
+			count = 0
 		}
 	}
 }
